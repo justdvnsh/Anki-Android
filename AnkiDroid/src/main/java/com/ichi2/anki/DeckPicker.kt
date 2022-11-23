@@ -234,6 +234,7 @@ open class DeckPicker :
     // stored for testing purposes
     @VisibleForTesting
     var createMenuJob: Job? = null
+    private var loadDeckCounts: Job? = null
 
     init {
         ChangeManager.subscribe(this)
@@ -702,12 +703,12 @@ open class DeckPicker :
                 BadgeDrawableBuilder.removeBadge(menuItem)
             }
             SyncIconState.PendingChanges -> {
-                BadgeDrawableBuilder(resources)
+                BadgeDrawableBuilder(this)
                     .withColor(ContextCompat.getColor(this@DeckPicker, R.color.badge_warning))
                     .replaceBadge(menuItem)
             }
             SyncIconState.FullSync, SyncIconState.NotLoggedIn -> {
-                BadgeDrawableBuilder(resources)
+                BadgeDrawableBuilder(this)
                     .withText('!')
                     .withColor(ContextCompat.getColor(this@DeckPicker, R.color.badge_error))
                     .replaceBadge(menuItem)
@@ -939,7 +940,7 @@ open class DeckPicker :
         Timber.d("onPause()")
         mActivityPaused = true
         // The deck count will be computed on resume. No need to compute it now
-        TaskManager.cancelAllTasks(LoadDeckCounts::class.java)
+        loadDeckCounts?.cancel()
         super.onPause()
     }
 
@@ -1208,11 +1209,6 @@ open class DeckPicker :
                         integrityCheck()
                     }
                     negativeButton(R.string.close) {
-                        restartActivity()
-                    }
-                    @Suppress("Deprecation")
-                    // TODO: Cleanup - Remove neutral button from here
-                    neutralButton {
                         restartActivity()
                     }
                     cancelOnTouchOutside(false)
@@ -2154,21 +2150,6 @@ open class DeckPicker :
         mRecyclerViewLayoutManager.scrollToPositionWithOffset(position, recyclerView.height / 2)
     }
 
-    private fun <T : AbstractDeckTreeNode> updateDeckListListener(): UpdateDeckListListener<T> {
-        return UpdateDeckListListener(this)
-    }
-
-    private class UpdateDeckListListener<T : AbstractDeckTreeNode>(deckPicker: DeckPicker) : TaskListenerWithContext<DeckPicker, Void, List<TreeNode<T>>?>(deckPicker) {
-        override fun actualOnPreExecute(context: DeckPicker) {
-            if (!context.colIsOpen()) {
-                context.showProgressBar()
-            }
-            Timber.d("Refreshing deck list")
-        }
-
-        override fun actualOnPostExecute(context: DeckPicker, result: List<TreeNode<T>>?) = context.onDecksLoaded(result)
-    }
-
     /**
      * Launch an asynchronous task to rebuild the deck list and recalculate the deck counts. Use this
      * after any change to a deck (e.g., rename, importing, add/delete) that needs to be reflected
@@ -2197,7 +2178,15 @@ open class DeckPicker :
                 }
             }
         } else {
-            TaskManager.launchCollectionTask(LoadDeckCounts(), updateDeckListListener())
+            loadDeckCounts?.cancel()
+            loadDeckCounts = launchCatchingTask {
+                Timber.d("Refreshing deck list")
+                withProgress {
+                    Timber.d("doInBackgroundLoadDeckCounts")
+                    val deckData = withCol { sched.deckDueTree(null) }
+                    onDecksLoaded(deckData)
+                }
+            }
         }
     }
 
@@ -2213,7 +2202,7 @@ open class DeckPicker :
             showCollectionErrorDialog()
             return
         }
-        dueTree = result.map { x -> x.unsafeCastToType() }
+        dueTree = result.map { x -> TreeNode(x.value) }
         renderPage()
         // Update the mini statistics bar as well
         launchCatchingTask {
